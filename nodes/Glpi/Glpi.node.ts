@@ -114,14 +114,32 @@ export class Glpi implements INodeType {
         if (['POST', 'PUT', 'PATCH'].includes(method)) {
           requestOptions.headers!['Content-Type'] = 'application/json';
 
-          // Get body parameters if they exist
-          try {
-            const bodyParameters = this.getNodeParameter('requestBody', i, {}) as IDataObject;
-            if (Object.keys(bodyParameters).length > 0) {
-              requestOptions.body = bodyParameters;
+          // Build body from OpenAPI-generated fields with routing.send.type === 'body'.
+          // The builder creates one field per body property (e.g. name, content, status),
+          // not a single 'requestBody' aggregate object.
+          const bodyData: IDataObject = {};
+          for (const prop of properties) {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const propConfig = prop as any;
+            const routing = propConfig.routing;
+            if (routing?.send?.type === 'body') {
+              const supportedOperations = propConfig.displayOptions?.show?.operation;
+              if (Array.isArray(supportedOperations) && !supportedOperations.includes(operation)) {
+                continue;
+              }
+              try {
+                const value = this.getNodeParameter(prop.name, i);
+                if (value !== undefined && value !== null && value !== '') {
+                  const bodyKey: string = routing.send.property ?? prop.name;
+                  bodyData[bodyKey] = value;
+                }
+              } catch {
+                // Property not applicable to this operation
+              }
             }
-          } catch {
-            // requestBody parameter might not exist for all operations
+          }
+          if (Object.keys(bodyData).length > 0) {
+            requestOptions.body = bodyData;
           }
         }
 
