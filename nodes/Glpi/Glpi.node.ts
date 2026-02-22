@@ -125,14 +125,33 @@ export class Glpi implements INodeType {
           }
         }
 
-        // Add query parameters if they exist
-        try {
-          const queryParameters = this.getNodeParameter('queryParameters', i, {}) as IDataObject;
-          if (Object.keys(queryParameters).length > 0) {
-            requestOptions.qs = queryParameters;
+        // Add query parameters from the OpenAPI-generated fields.
+        // The builder creates one field per query param (e.g. filter/start/limit/sort),
+        // not a single "queryParameters" aggregate object.
+        const queryParams: IDataObject = {};
+        for (const prop of properties) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const propConfig = prop as any;
+          const routing = propConfig.routing;
+          if (routing?.send?.type === 'query') {
+            const supportedOperations = propConfig.displayOptions?.show?.operation;
+            if (Array.isArray(supportedOperations) && !supportedOperations.includes(operation)) {
+              continue;
+            }
+
+            try {
+              const value = this.getNodeParameter(prop.name, i);
+              if (value !== undefined && value !== null && value !== '') {
+                const queryKey: string = routing.send.property ?? prop.name;
+                queryParams[queryKey] = value;
+              }
+            } catch {
+              // Property not applicable to this operation
+            }
           }
-        } catch {
-          // queryParameters might not exist for all operations
+        }
+        if (Object.keys(queryParams).length > 0) {
+          requestOptions.qs = queryParams;
         }
 
         // Add header parameters from OpenAPI spec (GLPI-specific headers)
