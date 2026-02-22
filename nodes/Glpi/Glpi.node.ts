@@ -80,12 +80,13 @@ export class Glpi implements INodeType {
         // Get the operation parameter from the OpenAPI-generated properties
         const operation = this.getNodeParameter('operation', i) as string;
 
-        // Parse the operation ID to extract HTTP method and path
-        // Format: "GET -Administration-User-Me" -> method: GET, path: /Administration/User/Me
+        // Parse the operation to extract HTTP method and path.
+        // The OperationParser makes value() === name(), so the format is e.g. "GET /Assistance/Ticket".
+        // pathPart already starts with '/', so we must not prepend another '/'.
         const operationParts = operation.split(' ');
         const method = operationParts[0] as string;
-        const pathPart = operationParts[1]?.replace(/^-/, '') || '';
-        let path = '/' + pathPart.replace(/-/g, '/');
+        const pathPart = operationParts[1] || '';
+        let path = pathPart.startsWith('/') ? pathPart : '/' + pathPart.replace(/-/g, '/');
 
         // Replace path parameters (e.g., {id}, {name}) with actual values
         const pathParamRegex = /\{([^}]+)\}/g;
