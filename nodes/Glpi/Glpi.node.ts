@@ -40,6 +40,26 @@ const parser = new N8NPropertiesBuilder(doc, config);
 // Generate all the properties (fields, operations, etc.) from the OpenAPI spec
 const properties = parser.build();
 
+// Returns true for values that should be omitted from body/query params.
+// n8n serializes uncompleted JSON fields as strings like "{}" or "[\n  {}\n]"
+// before they reach execute(), so we must handle both raw and stringified forms.
+const isEmptyValue = (val: unknown): boolean => {
+  if (val === undefined || val === null || val === '' || val === 0) return true;
+  if (typeof val === 'string') {
+    const t = val.trim();
+    if (t === '{}' || t === '[]') return true;
+    try { return isEmptyValue(JSON.parse(t)); } catch {}
+  }
+  if (Array.isArray(val)) {
+    return val.length === 0 ||
+      val.every(v => typeof v === 'object' && v !== null && Object.keys(v).length === 0);
+  }
+  if (typeof val === 'object') {
+    return Object.keys(val as object).length === 0;
+  }
+  return false;
+};
+
 export class Glpi implements INodeType {
   description: INodeTypeDescription = {
     displayName: 'GLPI',
@@ -130,7 +150,7 @@ export class Glpi implements INodeType {
               }
               try {
                 const value = this.getNodeParameter(prop.name, i);
-                if (value !== undefined && value !== null && value !== '') {
+                if (!isEmptyValue(value)) {
                   const bodyKey: string = routing.send.property ?? prop.name;
                   bodyData[bodyKey] = value;
                 }
@@ -160,7 +180,7 @@ export class Glpi implements INodeType {
 
             try {
               const value = this.getNodeParameter(prop.name, i);
-              if (value !== undefined && value !== null && value !== '') {
+              if (!isEmptyValue(value)) {
                 const queryKey: string = routing.send.property ?? prop.name;
                 queryParams[queryKey] = value;
               }
