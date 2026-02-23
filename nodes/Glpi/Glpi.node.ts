@@ -82,13 +82,6 @@ export class Glpi implements INodeType {
         required: true,
       },
     ],
-    requestDefaults: {
-      headers: {
-        Accept: 'application/json',
-        'Content-Type': 'application/json',
-      },
-      baseURL: '={{$credentials.glpiUrl}}/api.php',
-    },
     properties: properties,
 		usableAsTool: true,
   };
