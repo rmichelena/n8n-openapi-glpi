@@ -67,7 +67,7 @@ export class GlpiOAuth2Api implements ICredentialType {
 			displayName: 'Scope',
 			name: 'scope',
 			type: 'hidden',
-			default: 'email user api inventory status graphql',
+			default: 'api',
 		},
 		{
 			displayName: 'Auth URI Query Parameters',

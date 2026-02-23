@@ -14,7 +14,7 @@
     ],
     "primaryDocumentation": [
       {
-        "url": "https://github.com/glpi-project/glpi/blob/master/apirest.md"
+        "url": "https://glpi-developer-documentation.readthedocs.io/en/latest/devapi/hlapi/"
       }
     ]
   },

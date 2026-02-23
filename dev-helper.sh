@@ -105,13 +105,11 @@ fetch_openapi() {
     # Check if GLPI 10.1+ with modern API
     echo "Checking for modern API (GLPI 10.1+)..."
     
-    # Try to fetch from the modern API endpoint
-    modern_api_url="${glpi_url}/api.php/swagger"
-    
-    echo "Attempting to fetch from: $modern_api_url"
-    
+    # The HL API exposes the OpenAPI spec at /api.php/doc.json
+    echo "Attempting to fetch from: ${glpi_url}/api.php/doc.json"
+
     # Use curl to fetch the OpenAPI spec
-    curl -s -o temp_openapi.json "${modern_api_url}/openapi.json" 2>/dev/null
+    curl -s -o temp_openapi.json "${glpi_url}/api.php/doc.json" 2>/dev/null
     
     if [ -s temp_openapi.json ]; then
         # Check if it's valid JSON
