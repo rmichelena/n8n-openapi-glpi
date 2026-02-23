@@ -90,10 +90,43 @@ export class Glpi implements INodeType {
     const items = this.getInputData();
     const returnData: INodeExecutionData[] = [];
 
-    // Read credentials once — URL only. Token lifecycle (obtain, cache, refresh)
-    // is handled entirely by httpRequestWithAuthentication via the glpiOAuth2Api credential.
+    // Read credentials once and obtain an OAuth2 access token before the item loop.
+    // n8n's httpRequestWithAuthentication requires a token already stored in the credential
+    // store (populated by the user clicking "Connect" in the UI), which is not guaranteed
+    // for password-grant flows. We fetch the token manually once and reuse it for all items.
     const credentials = await this.getCredentials('glpiOAuth2Api');
     const baseUrl = (credentials.glpiUrl as string).replace(/\/+$/, '');
+    const tokenUrl = `${baseUrl}/api.php/token`;
+
+    const tokenBody: IDataObject = {
+      grant_type: 'password',
+      username: credentials.username as string,
+      password: credentials.password as string,
+      scope: (credentials.scope as string) || 'api',
+    };
+    // Include client credentials only when provided (public clients omit them).
+    if (credentials.clientId) tokenBody.client_id = credentials.clientId as string;
+    if (credentials.clientSecret) tokenBody.client_secret = credentials.clientSecret as string;
+
+    // The token endpoint expects application/x-www-form-urlencoded.
+    // Passing an object body with that Content-Type header and json:true makes n8n
+    // URL-encode the body automatically while still parsing the JSON response.
+    const tokenResponse = await this.helpers.httpRequest({
+      method: 'POST',
+      url: tokenUrl,
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: tokenBody,
+      json: true,
+      skipSslCertificateValidation: !!(credentials.ignoreSSLIssues),
+    });
+
+    const accessToken = tokenResponse.access_token as string;
+    if (!accessToken) {
+      throw new NodeOperationError(
+        this.getNode(),
+        'OAuth2 token request succeeded but returned no access_token. Check GLPI credentials.',
+      );
+    }
 
     for (let i = 0; i < items.length; i++) {
       try {
@@ -189,19 +222,10 @@ export class Glpi implements INodeType {
           requestOptions.qs = queryParams;
         }
 
-        // Let n8n handle OAuth2: token acquisition (password grant), caching,
-        // refresh on expiry, SSL settings from the credential, and Basic Auth
-        // vs body placement of client_id/client_secret per the credential config.
-        //
-        // Must use .call(this) so that the 'this' inside httpRequestWithAuthentication
-        // is the execution context (IExecuteFunctions), not the helpers object.
-        // Without it, internal calls like this.getNode() fail at runtime.
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const response = await (this.helpers.httpRequestWithAuthentication as any).call(
-          this,
-          'glpiOAuth2Api',
-          requestOptions,
-        );
+        requestOptions.headers!['Authorization'] = `Bearer ${accessToken}`;
+        requestOptions.skipSslCertificateValidation = !!(credentials.ignoreSSLIssues);
+
+        const response = await this.helpers.httpRequest(requestOptions);
 
         if (Array.isArray(response)) {
           returnData.push(...response.map((item) => ({ json: item })));
