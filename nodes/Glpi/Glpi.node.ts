@@ -95,191 +95,119 @@ export class Glpi implements INodeType {
     const items = this.getInputData();
     const returnData: INodeExecutionData[] = [];
 
+    // Read credentials once — URL only. Token lifecycle (obtain, cache, refresh)
+    // is handled entirely by httpRequestWithAuthentication via the glpiOAuth2Api credential.
+    const credentials = await this.getCredentials('glpiOAuth2Api');
+    const baseUrl = (credentials.glpiUrl as string).replace(/\/+$/, '');
+
     for (let i = 0; i < items.length; i++) {
       try {
-        // Get the operation parameter from the OpenAPI-generated properties
         const operation = this.getNodeParameter('operation', i) as string;
 
-        // Parse the operation to extract HTTP method and path.
-        // The OperationParser makes value() === name(), so the format is e.g. "GET /Assistance/Ticket".
-        // pathPart already starts with '/', so we must not prepend another '/'.
+        // The OperationParser makes value() === name(), producing e.g. "GET /Assistance/Ticket".
         const operationParts = operation.split(' ');
-        const method = operationParts[0] as string;
+        const method = operationParts[0];
         const pathPart = operationParts[1] || '';
+
+        const validMethods = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'];
+        if (!validMethods.includes(method)) {
+          throw new NodeOperationError(this.getNode(), `Invalid HTTP method parsed from operation: "${method}"`);
+        }
+
+        // Build path — pathPart already starts with '/' when coming from the name()-based parser.
         let path = pathPart.startsWith('/') ? pathPart : '/' + pathPart.replace(/-/g, '/');
 
-        // Replace path parameters (e.g., {id}, {name}) with actual values
-        const pathParamRegex = /\{([^}]+)\}/g;
-        let match;
-        while ((match = pathParamRegex.exec(path)) !== null) {
-          const paramName = match[1];
+        // Replace path parameters using replace+callback to avoid the lastIndex/mutation bug
+        // that a while+exec loop with a stateful /g regex would produce.
+        path = path.replace(/\{([^}]+)\}/g, (placeholder, paramName: string) => {
           try {
-            const paramValue = this.getNodeParameter(paramName, i) as string;
-            path = path.replace(`{${paramName}}`, encodeURIComponent(paramValue));
+            return encodeURIComponent(this.getNodeParameter(paramName, i) as string);
           } catch {
-            // Parameter not found, leave as is
+            return placeholder;
+          }
+        });
+
+        // Fail loudly if any path parameter went unresolved — a silent {id} in the URL
+        // produces a cryptic 404 that is very hard to debug.
+        const unresolved = path.match(/\{[^}]+\}/g);
+        if (unresolved) {
+          throw new NodeOperationError(
+            this.getNode(),
+            `Missing required path parameter(s): ${unresolved.join(', ')}`,
+          );
+        }
+
+        const requestOptions: IHttpRequestOptions = {
+          method: method as 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE',
+          url: `${baseUrl}/api.php${path}`,
+          headers: { Accept: 'application/json' },
+          json: true,
+        };
+
+        // Collect body / query / header params by reading each OpenAPI-generated property
+        // that has routing.send metadata. The builder never creates aggregate objects like
+        // 'requestBody' or 'queryParameters' — every field is its own property.
+        const bodyData: IDataObject = {};
+        const queryParams: IDataObject = {};
+
+        for (const prop of properties) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const routing = (prop as any).routing;
+          const sendType: string | undefined = routing?.send?.type;
+          if (!sendType || !['body', 'query', 'header'].includes(sendType)) continue;
+
+          // Skip properties that belong to a different operation.
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const supported = (prop as any).displayOptions?.show?.operation;
+          if (Array.isArray(supported) && !supported.includes(operation)) continue;
+
+          try {
+            const value = this.getNodeParameter(prop.name, i);
+            if (isEmptyValue(value)) continue;
+
+            const key: string = routing.send.property ?? prop.name;
+
+            if (sendType === 'body') {
+              bodyData[key] = value;
+            } else if (sendType === 'query') {
+              queryParams[key] = value;
+            } else {
+              // header — use the real header name from the spec, not the property name
+              requestOptions.headers![key] = String(value);
+            }
+          } catch {
+            // Property not applicable to this operation — safe to skip
           }
         }
 
-        // Build the request options
-        // Note: url is just the path, baseURL is set in requestDefaults
-        const requestOptions: IHttpRequestOptions = {
-          method: method as 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE',
-          url: path,
-          headers: {
-            'Accept': 'application/json',
-          },
-        };
-
-        // Add Content-Type header and body for methods that support it
         if (['POST', 'PUT', 'PATCH'].includes(method)) {
           requestOptions.headers!['Content-Type'] = 'application/json';
-
-          // Build body from OpenAPI-generated fields with routing.send.type === 'body'.
-          // The builder creates one field per body property (e.g. name, content, status),
-          // not a single 'requestBody' aggregate object.
-          const bodyData: IDataObject = {};
-          for (const prop of properties) {
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const propConfig = prop as any;
-            const routing = propConfig.routing;
-            if (routing?.send?.type === 'body') {
-              const supportedOperations = propConfig.displayOptions?.show?.operation;
-              if (Array.isArray(supportedOperations) && !supportedOperations.includes(operation)) {
-                continue;
-              }
-              try {
-                const value = this.getNodeParameter(prop.name, i);
-                if (!isEmptyValue(value)) {
-                  const bodyKey: string = routing.send.property ?? prop.name;
-                  bodyData[bodyKey] = value;
-                }
-              } catch {
-                // Property not applicable to this operation
-              }
-            }
-          }
           if (Object.keys(bodyData).length > 0) {
             requestOptions.body = bodyData;
           }
         }
 
-        // Add query parameters from the OpenAPI-generated fields.
-        // The builder creates one field per query param (e.g. filter/start/limit/sort),
-        // not a single "queryParameters" aggregate object.
-        const queryParams: IDataObject = {};
-        for (const prop of properties) {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const propConfig = prop as any;
-          const routing = propConfig.routing;
-          if (routing?.send?.type === 'query') {
-            const supportedOperations = propConfig.displayOptions?.show?.operation;
-            if (Array.isArray(supportedOperations) && !supportedOperations.includes(operation)) {
-              continue;
-            }
-
-            try {
-              const value = this.getNodeParameter(prop.name, i);
-              if (!isEmptyValue(value)) {
-                const queryKey: string = routing.send.property ?? prop.name;
-                queryParams[queryKey] = value;
-              }
-            } catch {
-              // Property not applicable to this operation
-            }
-          }
-        }
         if (Object.keys(queryParams).length > 0) {
           requestOptions.qs = queryParams;
         }
 
-        // Add header parameters from OpenAPI spec (GLPI-specific headers)
-        const headerParams = ['Accept-Language', 'GLPI-Entity', 'GLPI-Profile', 'GLPI-Entity-Recursive'];
-        for (const headerName of headerParams) {
-          try {
-            const headerValue = this.getNodeParameter(headerName, i);
-            if (headerValue !== undefined && headerValue !== null && headerValue !== '') {
-              requestOptions.headers![headerName] = String(headerValue);
-            }
-          } catch {
-            // Header parameter doesn't exist for this operation
-          }
-        }
+        // Let n8n handle OAuth2: token acquisition (password grant), caching,
+        // refresh on expiry, SSL settings from the credential, and Basic Auth
+        // vs body placement of client_id/client_secret per the credential config.
+        const response = await this.helpers.httpRequestWithAuthentication(
+          'glpiOAuth2Api',
+          requestOptions,
+        );
 
-        // Get credentials for OAuth2 authentication
-        const credentials = await this.getCredentials('glpiOAuth2Api');
-
-        // Get or refresh OAuth2 token manually
-        let accessToken = '';
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const tokenData = credentials.oauthTokenData as any;
-
-        // Check if we have a valid token
-        if (tokenData && tokenData.access_token && tokenData.expires_at) {
-          const now = Math.floor(Date.now() / 1000);
-          if (tokenData.expires_at > now) {
-            // Token is still valid
-            accessToken = tokenData.access_token;
-          }
-        }
-
-        // If no valid token, get a new one
-        if (!accessToken) {
-          try {
-            const tokenResponse = await this.helpers.httpRequest({
-              method: 'POST',
-              url: credentials.accessTokenUrl as string,
-              auth: {
-                username: credentials.clientId as string,
-                password: credentials.clientSecret as string,
-              },
-              body: {
-                grant_type: 'password',
-                username: credentials.username,
-                password: credentials.password,
-                scope: credentials.scope,
-              },
-              headers: {
-                'Content-Type': 'application/x-www-form-urlencoded',
-              },
-              json: true,
-            });
-
-            accessToken = tokenResponse.access_token;
-
-            // TODO: Save token back to credentials for caching
-            // This would require updating the credential, which is complex
-          } catch (error) {
-            const errorMessage = `OAuth2 token request failed: ${error instanceof Error ? error.message : String(error)}`;
-            throw new NodeOperationError(this.getNode(), errorMessage);
-          }
-        }
-
-        // Add the access token to the request
-        requestOptions.headers!['Authorization'] = `Bearer ${accessToken}`;
-
-        // Build full URL
-        const fullUrl = `${credentials.glpiUrl}/api.php${path}`;
-        requestOptions.url = fullUrl;
-
-        // Ensure response is parsed as JSON
-        requestOptions.json = true;
-
-        // Execute the request with the access token
-        const response = await this.helpers.httpRequest(requestOptions);
-
-        // Handle the response
         if (Array.isArray(response)) {
-          returnData.push(...response.map(item => ({ json: item })));
+          returnData.push(...response.map((item) => ({ json: item })));
         } else {
-          returnData.push({ json: response });
+          returnData.push({ json: response as IDataObject });
         }
       } catch (error) {
         if (this.continueOnFail()) {
           returnData.push({
-            json: {
-              error: error instanceof Error ? error.message : String(error),
-            },
+            json: { error: error instanceof Error ? error.message : String(error) },
           });
           continue;
         }
