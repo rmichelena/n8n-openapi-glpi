@@ -44,7 +44,9 @@ const properties = parser.build();
 // n8n serializes uncompleted JSON fields as strings like "{}" or "[\n  {}\n]"
 // before they reach execute(), so we must handle both raw and stringified forms.
 const isEmptyValue = (val: unknown): boolean => {
-  if (val === undefined || val === null || val === '' || val === 0) return true;
+  // Do NOT treat 0 as empty: it is a valid value in many GLPI fields
+  // (e.g. entity=0 is the root entity, start=0 for pagination).
+  if (val === undefined || val === null || val === '') return true;
   if (typeof val === 'string') {
     const t = val.trim();
     if (t === '{}' || t === '[]') return true;
