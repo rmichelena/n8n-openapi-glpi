@@ -177,8 +177,11 @@ export class Glpi implements INodeType {
               // header — use the real header name from the spec, not the property name
               requestOptions.headers![key] = String(value);
             }
-          } catch {
-            // Property not applicable to this operation — safe to skip
+          } catch (error) {
+            // Re-throw real evaluation errors (e.g. invalid expression, type mismatch)
+            // so they surface with a useful message instead of silently dropping the field.
+            // Only swallow soft "parameter not available in this context" failures.
+            if (error instanceof NodeOperationError) throw error;
           }
         }
 
