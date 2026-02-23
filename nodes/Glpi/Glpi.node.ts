@@ -6,6 +6,7 @@ import {
   IHttpRequestOptions,
   IDataObject,
   NodeOperationError,
+  INodeProperties,
 } from 'n8n-workflow';
 import {
   N8NPropertiesBuilder,
@@ -21,8 +22,16 @@ import * as doc from './openapi.json';
  * IT Asset Management and Helpdesk System
  */
 
-// Ensure option values match the displayed operation names so displayOptions work correctly
+// Ensure operation values always follow "METHOD /path" format, regardless of
+// whether the OpenAPI spec has operationIds. DefaultOperationParser.name() falls back to
+// lodash.startCase(operationId) when an operationId is present, producing e.g.
+// "Get Ticket By Id" instead of "GET /Assistance/Ticket/{id}". Overriding name() here
+// guarantees execute() can always split on the first space to get method and path.
 class OperationParser extends DefaultOperationParser {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  name(operation: any, context: OperationContext): string {
+    return context.method.toUpperCase() + ' ' + context.pattern;
+  }
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   value(operation: any, context: OperationContext): string {
     return this.name(operation, context);
@@ -39,6 +48,25 @@ const parser = new N8NPropertiesBuilder(doc, config);
 
 // Generate all the properties (fields, operations, etc.) from the OpenAPI spec
 const properties = parser.build();
+
+// Pre-index routable properties (body/query/header) by operation value so that
+// execute() can look them up in O(1) instead of scanning all properties on every call.
+// The OpenAPI spec generates thousands of properties; iterating them all per item
+// would make execution noticeably slow.
+const operationPropertiesMap = new Map<string, INodeProperties[]>();
+for (const prop of properties) {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const routing = (prop as any).routing;
+  const sendType: string | undefined = routing?.send?.type;
+  if (!sendType || !['body', 'query', 'header'].includes(sendType)) continue;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const ops: unknown = (prop as any).displayOptions?.show?.operation;
+  if (!Array.isArray(ops)) continue;
+  for (const op of ops as string[]) {
+    if (!operationPropertiesMap.has(op)) operationPropertiesMap.set(op, []);
+    operationPropertiesMap.get(op)!.push(prop);
+  }
+}
 
 // Returns true for values that should be omitted from body/query params.
 // n8n serializes uncompleted JSON fields as strings like "{}" or "[\n  {}\n]"
@@ -83,7 +111,7 @@ export class Glpi implements INodeType {
       },
     ],
     properties: properties,
-		usableAsTool: true,
+    usableAsTool: true,
   };
 
   async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
@@ -92,30 +120,30 @@ export class Glpi implements INodeType {
 
     // Read credentials once and obtain an OAuth2 access token before the item loop.
     // n8n's httpRequestWithAuthentication requires a token already stored in the credential
-    // store (populated by the user clicking "Connect" in the UI), which is not guaranteed
-    // for password-grant flows. We fetch the token manually once and reuse it for all items.
+    // store (populated by clicking "Connect" in the UI). For GLPI's password grant there is
+    // no browser consent screen and n8n does not auto-fetch the token, so we do it manually.
+    // The token is fetched once and reused for all items in this execution.
     const credentials = await this.getCredentials('glpiOAuth2Api');
     const baseUrl = (credentials.glpiUrl as string).replace(/\/+$/, '');
     const tokenUrl = `${baseUrl}/api.php/token`;
 
-    const tokenBody: IDataObject = {
+    // Serialize body as a URL-encoded string to guarantee correct Content-Type handling
+    // regardless of the n8n version (avoids ambiguity of object body + json:true).
+    const tokenBodyEntries: Record<string, string> = {
       grant_type: 'password',
       username: credentials.username as string,
       password: credentials.password as string,
       scope: (credentials.scope as string) || 'api',
     };
     // Include client credentials only when provided (public clients omit them).
-    if (credentials.clientId) tokenBody.client_id = credentials.clientId as string;
-    if (credentials.clientSecret) tokenBody.client_secret = credentials.clientSecret as string;
+    if (credentials.clientId) tokenBodyEntries.client_id = credentials.clientId as string;
+    if (credentials.clientSecret) tokenBodyEntries.client_secret = credentials.clientSecret as string;
 
-    // The token endpoint expects application/x-www-form-urlencoded.
-    // Passing an object body with that Content-Type header and json:true makes n8n
-    // URL-encode the body automatically while still parsing the JSON response.
     const tokenResponse = await this.helpers.httpRequest({
       method: 'POST',
       url: tokenUrl,
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: tokenBody,
+      body: new URLSearchParams(tokenBodyEntries).toString(),
       json: true,
       skipSslCertificateValidation: !!(credentials.ignoreSSLIssues),
     });
@@ -132,7 +160,7 @@ export class Glpi implements INodeType {
       try {
         const operation = this.getNodeParameter('operation', i) as string;
 
-        // The OperationParser makes value() === name(), producing e.g. "GET /Assistance/Ticket".
+        // OperationParser guarantees format "METHOD /path" (e.g. "GET /Assistance/Ticket").
         const operationParts = operation.split(' ');
         const method = operationParts[0];
         const pathPart = operationParts[1] || '';
@@ -142,8 +170,8 @@ export class Glpi implements INodeType {
           throw new NodeOperationError(this.getNode(), `Invalid HTTP method parsed from operation: "${method}"`);
         }
 
-        // Build path — pathPart already starts with '/' when coming from the name()-based parser.
-        let path = pathPart.startsWith('/') ? pathPart : '/' + pathPart.replace(/-/g, '/');
+        // Build path — OperationParser uses context.pattern which always starts with '/'.
+        let path = pathPart.startsWith('/') ? pathPart : '/' + pathPart;
 
         // Replace path parameters using replace+callback to avoid the lastIndex/mutation bug
         // that a while+exec loop with a stateful /g regex would produce.
@@ -168,26 +196,23 @@ export class Glpi implements INodeType {
         const requestOptions: IHttpRequestOptions = {
           method: method as 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE',
           url: `${baseUrl}/api.php${path}`,
-          headers: { Accept: 'application/json' },
+          headers: {
+            Accept: 'application/json',
+            Authorization: `Bearer ${accessToken}`,
+          },
           json: true,
+          skipSslCertificateValidation: !!(credentials.ignoreSSLIssues),
         };
 
-        // Collect body / query / header params by reading each OpenAPI-generated property
-        // that has routing.send metadata. The builder never creates aggregate objects like
-        // 'requestBody' or 'queryParameters' — every field is its own property.
+        // Use the pre-indexed map: O(1) lookup per operation instead of O(n) scan.
+        const operationProps = operationPropertiesMap.get(operation) ?? [];
         const bodyData: IDataObject = {};
         const queryParams: IDataObject = {};
 
-        for (const prop of properties) {
+        for (const prop of operationProps) {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const routing = (prop as any).routing;
-          const sendType: string | undefined = routing?.send?.type;
-          if (!sendType || !['body', 'query', 'header'].includes(sendType)) continue;
-
-          // Skip properties that belong to a different operation.
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const supported = (prop as any).displayOptions?.show?.operation;
-          if (Array.isArray(supported) && !supported.includes(operation)) continue;
+          const sendType: string = routing.send.type;
 
           try {
             const value = this.getNodeParameter(prop.name, i);
@@ -221,9 +246,6 @@ export class Glpi implements INodeType {
         if (Object.keys(queryParams).length > 0) {
           requestOptions.qs = queryParams;
         }
-
-        requestOptions.headers!['Authorization'] = `Bearer ${accessToken}`;
-        requestOptions.skipSslCertificateValidation = !!(credentials.ignoreSSLIssues);
 
         const response = await this.helpers.httpRequest(requestOptions);
 

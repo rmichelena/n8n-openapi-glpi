@@ -1,91 +1,84 @@
 import {
-	ICredentialType,
-	INodeProperties,
-	Icon,
+  ICredentialType,
+  INodeProperties,
+  Icon,
 } from 'n8n-workflow';
 
 /**
  * GLPI API Credentials for GLPI 11+
- * Uses OAuth2 password grant authentication
+ *
+ * Authentication is handled entirely by the node using OAuth2 password grant.
+ * We do NOT extend oAuth2Api because:
+ *   1. Password grant has no browser consent screen, so there is no "Connect" flow.
+ *   2. n8n's httpRequestWithAuthentication requires a pre-stored token (oauthTokenData)
+ *      that is only written after the user clicks "Connect" — which never appears for
+ *      password grant in current n8n versions.
+ * The node fetches the token manually at execution time and injects it as a Bearer header.
  */
 export class GlpiOAuth2Api implements ICredentialType {
-	name = 'glpiOAuth2Api';
-	displayName = 'GLPI OAuth2 API';
-	documentationUrl = 'https://glpi-developer-documentation.readthedocs.io/en/latest/devapi/hlapi/';
-	icon: Icon = { light: 'file:../icons/glpi_white.svg', dark: 'file:../icons/glpi_color.svg' };
-	extends = ['oAuth2Api'];
-	properties: INodeProperties[] = [
-		{
-			displayName: 'GLPI URL',
-			name: 'glpiUrl',
-			type: 'string',
-			default: '',
-			placeholder: 'http://localhost',
-			description: 'The base URL of your GLPI installation',
-			required: true,
-		},
-		{
-			displayName: 'Grant Type',
-			name: 'grantType',
-			type: 'hidden',
-			default: 'password',
-		},
-		{
-			displayName: 'Username',
-			name: 'username',
-			type: 'string',
-			default: '',
-			description: 'GLPI username for OAuth2 password grant',
-			required: true,
-		},
-		{
-			displayName: 'Password',
-			name: 'password',
-			type: 'string',
-			typeOptions: {
-				password: true,
-			},
-			default: '',
-			description: 'GLPI password for OAuth2 password grant',
-			required: true,
-		},
-		{
-			displayName: 'Authorization URL',
-			name: 'authUrl',
-			type: 'hidden',
-			default: '={{$self["glpiUrl"]}}/api.php/authorize',
-			required: true,
-		},
-		{
-			displayName: 'Access Token URL',
-			name: 'accessTokenUrl',
-			type: 'hidden',
-			default: '={{$self["glpiUrl"]}}/api.php/token',
-			required: true,
-		},
-		{
-			displayName: 'Scope',
-			name: 'scope',
-			type: 'hidden',
-			default: 'api',
-		},
-		{
-			displayName: 'Auth URI Query Parameters',
-			name: 'authQueryParameters',
-			type: 'hidden',
-			default: '',
-		},
-		{
-			displayName: 'Authentication',
-			name: 'authentication',
-			type: 'hidden',
-			default: 'body',
-		},
-		{
-			displayName: 'Ignore SSL Issues',
-			name: 'ignoreSSLIssues',
-			type: 'hidden',
-			default: false,
-		},
-	];
+  name = 'glpiOAuth2Api';
+  displayName = 'GLPI API';
+  documentationUrl = 'https://glpi-developer-documentation.readthedocs.io/en/latest/devapi/hlapi/';
+  icon: Icon = { light: 'file:../icons/glpi_white.svg', dark: 'file:../icons/glpi_color.svg' };
+
+  properties: INodeProperties[] = [
+    {
+      displayName: 'GLPI URL',
+      name: 'glpiUrl',
+      type: 'string',
+      default: '',
+      placeholder: 'https://your-glpi.example.com',
+      description: 'Base URL of your GLPI installation (without trailing slash)',
+      required: true,
+    },
+    {
+      displayName: 'Username',
+      name: 'username',
+      type: 'string',
+      default: '',
+      description: 'GLPI username',
+      required: true,
+    },
+    {
+      displayName: 'Password',
+      name: 'password',
+      type: 'string',
+      typeOptions: {
+        password: true,
+      },
+      default: '',
+      description: 'GLPI password',
+      required: true,
+    },
+    {
+      displayName: 'Client ID',
+      name: 'clientId',
+      type: 'string',
+      default: '',
+      description: 'OAuth2 Client ID (optional — leave empty for public GLPI clients)',
+    },
+    {
+      displayName: 'Client Secret',
+      name: 'clientSecret',
+      type: 'string',
+      typeOptions: {
+        password: true,
+      },
+      default: '',
+      description: 'OAuth2 Client Secret (optional — leave empty for public GLPI clients)',
+    },
+    {
+      displayName: 'Scope',
+      name: 'scope',
+      type: 'hidden',
+      default: 'api',
+    },
+    {
+      displayName: 'Ignore SSL Issues',
+      name: 'ignoreSSLIssues',
+      type: 'boolean',
+      default: false,
+      description: 'Whether to ignore SSL certificate validation errors (useful for self-signed certificates)',
+    },
+  ];
 }
