@@ -192,7 +192,8 @@ export class Glpi implements INodeType {
         // Let n8n handle OAuth2: token acquisition (password grant), caching,
         // refresh on expiry, SSL settings from the credential, and Basic Auth
         // vs body placement of client_id/client_secret per the credential config.
-        const response = await this.helpers.httpRequestWithAuthentication(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const response = await (this as any).helpers.httpRequestWithAuthentication(
           'glpiOAuth2Api',
           requestOptions,
         );
