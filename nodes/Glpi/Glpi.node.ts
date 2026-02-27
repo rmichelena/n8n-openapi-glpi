@@ -46,8 +46,73 @@ const config: N8NPropertiesBuilderConfig = {
 // Create the properties builder instance with our OpenAPI document
 const parser = new N8NPropertiesBuilder(doc, config);
 
+// For optional body fields in write operations (POST/PUT/PATCH), the builder assigns a
+// concrete default (first enum value for options, true for booleans, 0 for numbers).
+// This causes those fields to be included in every request even when the user hasn't
+// touched them, silently overwriting existing values or sending unintended data on create.
+// We post-process the generated properties to make optional body fields in all write
+// operations start with an empty/null default so they are only sent when the user
+// explicitly fills them in.
+function makeOptionalWriteFieldsNullable(props: INodeProperties[]): INodeProperties[] {
+  return props.map((prop) => {
+    // Only apply to body parameters
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const routing = (prop as any).routing;
+    if (routing?.send?.type !== 'body') return prop;
+
+    // Required fields should keep their defaults
+    if (prop.required) return prop;
+
+    // Only apply when ALL operations for this field are write operations (POST/PUT/PATCH)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const ops: unknown = (prop as any).displayOptions?.show?.operation;
+    if (!Array.isArray(ops) || ops.length === 0) return prop;
+    const onlyWriteOps = (ops as string[]).every(
+      (op) => op.startsWith('POST ') || op.startsWith('PATCH ') || op.startsWith('PUT '),
+    );
+    if (!onlyWriteOps) return prop;
+
+    if (prop.type === 'boolean') {
+      // Booleans can't be left blank in the UI; convert to an options field so the
+      // user can explicitly choose true/false or leave "(No change)" to omit the field.
+      return {
+        ...prop,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        type: 'options' as any,
+        options: [
+          { name: '(No Change)', value: '' },
+          { name: 'True', value: true },
+          { name: 'False', value: false },
+        ],
+        default: '',
+      };
+    }
+
+    if (prop.type === 'options') {
+      // Enum fields (e.g. Urgency, Impact, Priority, Status, Type) default to the first
+      // enum value. Prepend a "(No change)" option so the field is omitted when untouched.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const existingOptions = ((prop as any).options as any[]) ?? [];
+      return {
+        ...prop,
+        options: [{ name: '(No Change)', value: '' }, ...existingOptions],
+        default: '',
+      };
+    }
+
+    if (prop.type === 'number') {
+      // Number fields default to 0; use null so getNodeParameter returns null when
+      // untouched, which isEmptyValue() treats as empty and skips.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return { ...prop, default: null as any };
+    }
+
+    return prop;
+  });
+}
+
 // Generate all the properties (fields, operations, etc.) from the OpenAPI spec
-const properties = parser.build();
+const properties = makeOptionalWriteFieldsNullable(parser.build());
 
 // Pre-index routable properties (body/query/header) by operation value so that
 // execute() can look them up in O(1) instead of scanning all properties on every call.
